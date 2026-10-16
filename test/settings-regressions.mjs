@@ -31,6 +31,10 @@ const react = {
     const i = active.cursor++
     return active.slots[i] ??= { current: value }
   },
+  // 单框选择器用 useId 生成 aria 关联的 id;桩只要保证同一实例稳定、不同实例互不相同。
+  useId: () => 'test-id-' + (active.cursor++),
+  // useLayoutEffect 在桩里与 useEffect 等价:测试不区分绘制时机。
+  useLayoutEffect: (effect, deps) => react.useEffect(effect, deps),
   useEffect: (effect, deps) => {
     const runner = active, i = runner.cursor++, previous = runner.slots[i]
     if (!previous || !deps || deps.some((value, index) => !Object.is(value, previous.deps?.[index]))) {
@@ -342,19 +346,55 @@ console.log('[ok] 设置交互：千问空费率/自动保存回读/模型移除
 }
 console.log('[ok] #275: hidden price editors, on-demand catalog and model restore')
 // #282 concerns the channel-price selector for an unknown model, not catalog text search.
+// 单框选择器:一万个候选下仍全量可选、打字筛选、已选项不被筛掉、不误写映射。
 {
  const options = Array.from({ length: 10000 }, (_, i) => ({ value: `vendor-${i % 7}:model-${i}`, label: `Vendor ${i % 7} / Model ${i}` }))
- const writes = [], select = renderer(pricing.SearchPriceSelect, () => ({ options, value: options[9999].value, label: '匹配渠道模型价格', placeholder: '选择价格模型', locale: 'zh', onChange: value => writes.push(value) }))
- let tree = select(), list = () => nodes(tree).find(n => n.type === 'select'), search = () => nodes(tree).find(n => n.type === 'input')
- assert.ok(nodes(list()).filter(n => n.type === 'option').length <= 82, 'bounded native options for 10k models')
- assert.ok(nodes(list()).some(n => n.props.value === options[9999].value), 'selected model stays mounted')
- search().props.onChange({ target: { value: 'VENDOR-2 model-100' } }); tree = select()
- assert.ok(nodes(list()).filter(n => n.type === 'option' && n.props.value && n.props.value !== options[9999].value).every(n => n.props.value.includes('vendor-2') && n.props.value.includes('model-100')))
+ // 桩要跟踪当前值:否则「同值不重复写」永远测不到(组件读到的 value 一直没变过)。
+ let current = options[9999].value
+ const writes = []
+ const select = renderer(pricing.SearchPriceSelect, () => ({
+   options, value: current, label: '匹配渠道模型价格', placeholder: '选择价格模型', locale: 'zh',
+   onChange: value => { writes.push(value); current = value },
+ }))
+ let tree = select()
+ const combo = () => nodes(tree).find(n => n.type === 'input' && n.props.role === 'combobox')
+ const options_ = () => nodes(tree).filter(n => n.props.role === 'option')
+ const labels = () => options_().map(textOf)
+ const selectedLabel = options[9999].label
+ const searchText = option => (option.label + ' ' + option.value).toLowerCase()
+ // 关闭态:输入框显示已选标签,不建候选面板。
+ assert.equal(combo().props.value, selectedLabel, 'the closed field shows the selected label')
+ assert.equal(options_().length, 0, 'no candidate panel is built while closed')
+ // 打开:全部候选可点,不再截断(旧版截断 80 条会让后段厂商只能靠打字)。
+ combo().props.onFocus(); tree = select()
+ assert.equal(options_().length, 10000, 'every candidate is reachable, not just the first 80')
+ assert.equal(options_().filter(n => n.props['aria-selected'] === 'true').map(textOf).join(), selectedLabel, 'the selected model is marked in the list')
+ assert.deepEqual(writes, [], 'opening the list never writes a mapping')
+ // 打字筛选:多关键词 AND。期望集合由测试自己从原始候选算,不复用组件内部逻辑;
+ // 已选项与筛选词不匹配时会被有意补进列表(旧版原生下拉也始终显示当前值),要算进去。
+ combo().props.onChange({ target: { value: 'VENDOR-2 model-100' } }); tree = select()
+ const expected = options.filter(option => ['vendor-2', 'model-100'].every(word => searchText(option).includes(word))).map(option => option.label)
+ assert.ok(expected.length > 0 && expected.length < 10000, 'the probe query narrows the list')
+ const selectedStillShown = !expected.includes(selectedLabel)
+ assert.equal(labels().length, expected.length + (selectedStillShown ? 1 : 0), 'the filtered list holds exactly the matches plus the current choice')
+ assert.ok(labels().every(label => expected.includes(label) || label === selectedLabel), 'every displayed row is a real match or the current choice')
  assert.deepEqual(writes, [], 'filtering does not change a saved mapping')
- search().props.onChange({ target: { value: 'does-not-exist' } }); tree = select(); assert.ok(textOf(tree).includes('没有匹配的模型'))
- assert.equal(list().props.value, options[9999].value)
- search().props.onKeyDown({ key: 'Escape', stopPropagation() {} }); tree = select(); assert.equal(search().props.value, '')
- list().props.onChange({ target: { value: options[2].value } }); assert.deepEqual(writes, [options[2].value])
+ // 已选项在筛选词不匹配时仍留在列表里(旧版原生下拉一直显示当前值)。
+ combo().props.onChange({ target: { value: 'does-not-exist' } }); tree = select()
+ assert.ok(textOf(tree).includes('没有匹配的模型'), 'an unmatched query says so')
+ assert.equal(labels().join(), selectedLabel, 'the selected model survives a non-matching query')
+ assert.deepEqual(writes, [], 'an empty result set never writes a mapping')
+ // Escape 关掉列表并丢弃未提交的筛选词,输入框回到已选标签。
+ combo().props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); tree = select()
+ assert.equal(options_().length, 0, 'Escape closes the list')
+ assert.equal(combo().props.value, selectedLabel, 'Escape restores the selected label')
+ // 选中一个候选:只写一次,且同值不重复写。
+ combo().props.onFocus(); tree = select()
+ options_().find(n => textOf(n) === options[2].label).props.onClick(); tree = select()
+ assert.deepEqual(writes, [options[2].value], 'picking a candidate writes exactly once')
+ combo().props.onFocus(); tree = select()
+ options_().find(n => textOf(n) === options[2].label).props.onClick(); tree = select()
+ assert.deepEqual(writes, [options[2].value], 're-picking the same value does not write again')
 }
 // A slow first write must not overtake or erase the next setting.
 {
