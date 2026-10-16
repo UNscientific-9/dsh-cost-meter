@@ -48,7 +48,9 @@ window.__ModuleLoader__.load({
       const rootRef = useRef(null), inputRef = useRef(null), panelRef = useRef(null)
       const selected = options.find(option => option.value === value)
       const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean)
-      // 候选文本只在 options 变化时小写化一次(上游 1.8.29 的做法),不每帧现算。
+      // 候选文本只在 options 变化时小写化一次:打字时状态在子组件里,父组件不重渲染,
+      // options 引用稳定,memo 命中(实测连打 5 个字符 0 次重算);父组件真重渲染时
+      // options 是新数组,那时确实该重算。
       const indexed = useMemo(() => options.map(option => ({ option, search: comboText(option) })), [options])
       const matched = words.length ? indexed.filter(row => words.every(word => row.search.includes(word))).map(row => row.option) : options
       // 已选项始终留在列表里(旧版原生下拉一直显示当前值):筛选词不匹配时也不能让用户
@@ -79,13 +81,17 @@ window.__ModuleLoader__.load({
         // 面板恒挂到 body:设置面板是宿主 overlay 里 role=dialog 的 div(不是 <dialog> 元素),
         // 它带 overflow 与自己的层叠上下文;portal 到 body 才既不被裁、也不被压在下层。
         // 贴着输入框展开;下方空间不足时翻到上方,并按可用空间限高,避免超出窗口。
+        // 上下都不足时(窗口很矮)取较大的一侧,再把顶边夹回视口内——否则 top 会是负数,
+        // 面板被画到屏幕外。120 只是「宁可矮也不画出去」的下限,不能反过来撑出视口。
         const place = () => {
           const rect = node?.getBoundingClientRect?.()
           if (!rect || !browser) return
-          const below = browser.innerHeight - rect.bottom - 12, above = rect.top - 12
+          const viewport = browser.innerHeight, margin = 12
+          const below = viewport - rect.bottom - margin, above = rect.top - margin
           const flip = below < 180 && above > below
-          const maxHeight = Math.max(120, Math.min(280, flip ? above : below))
-          const top = flip ? rect.top - maxHeight - 6 : rect.bottom + 6
+          const available = Math.max(60, flip ? above : below)
+          const maxHeight = Math.min(280, available)
+          const top = Math.max(margin, Math.min(flip ? rect.top - maxHeight - 6 : rect.bottom + 6, viewport - maxHeight - margin))
           // 坐标没变就保留原对象:监听挂在 window 的 capture 上,滚动设置页里任意容器
           // 都会命中,否则每帧都要把整个候选面板重渲染一遍。
           setBox(prev => prev && prev.left === rect.left && prev.top === top && prev.width === rect.width && prev.maxHeight === maxHeight

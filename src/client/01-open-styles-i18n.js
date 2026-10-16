@@ -330,7 +330,7 @@ window.__ModuleLoader__.load({
       '.cm-mm-row.wide .cm-bbox-label{width:auto;max-width:64px;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.cm-mm-row.wide .cm-mm-text{flex:1;min-width:0;font-size:12px;color:var(--dsw-alias-label-secondary);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.cm-bal-line{font-size:13px;color:var(--dsw-alias-label-secondary)}',
-      '.cm-bal-line.warn{color:var(--dsw-alias-state-warning-primary,#b45309)}',
+      '.cm-bal-line.warn{color:var(--dsw-alias-state-warn-primary,#b45309)}',
       // footer.action 与其它插件共用 flex 容器；宽栏费用独占一行，窄栏图标纵排。
       // 0.1.7 的 SlotOutlet 多一层 display:contents 容器，布局规则需命中外层 flex。
       // 同时保留旧宿主的直接子节点结构；卡片隐藏/卸载后规则自动失效。

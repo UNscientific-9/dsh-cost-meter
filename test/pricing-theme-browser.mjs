@@ -126,7 +126,19 @@ try {
       assert.ok(contrast(option.color, blend(option.background, panel.background)) >= 4.5, `${theme}: option text stays readable, hovered or not`)
     }
     // 浅色主题下浮层与页面同为白底,必须靠宿主的 elevation 分层,否则看起来是「平贴」的。
-    assert.notEqual(panel.shadow, 'none', `${theme}: the open list keeps the host elevation shadow`)
+    // 只断言「不是 none」是恒真的(CSS 自带兜底阴影),所以这里断言阴影确实用了宿主 token 的值:
+    // 把 token 换成哨兵值,面板阴影必须跟着变。
+    assert.notEqual(panel.shadow, 'none', `${theme}: the open list paints a shadow`)
+    const sentinel = await page.evaluate(() => {
+      const previous = document.documentElement.style.getPropertyValue('--dsw-elevation-panel')
+      document.documentElement.style.setProperty('--dsw-elevation-panel', 'rgb(1, 2, 3) 0px 0px 0px 9px')
+      const shadow = getComputedStyle(document.querySelector('.cm-combo-panel')).boxShadow
+      if (previous) document.documentElement.style.setProperty('--dsw-elevation-panel', previous)
+      else document.documentElement.style.removeProperty('--dsw-elevation-panel')
+      return shadow
+    })
+    assert.ok(sentinel.includes('rgb(1, 2, 3)') && sentinel.includes('9px'),
+      `${theme}: the panel shadow actually follows the host elevation token (got ${sentinel})`)
     if (theme === 'midnight-light-host') await page.screenshot({ path: join(output, 'open-light-host.png'), fullPage: true })
     if (theme === 'host-dark') await page.screenshot({ path: join(output, 'open-dark.png'), fullPage: true })
     await page.keyboard.press('Escape')
@@ -134,27 +146,44 @@ try {
     await page.screenshot({ path: join(output, theme + '.png'), fullPage: true })
     checks.push({ theme, panelOptions: panel.options.length, portaled: panel.parent === 'BODY' })
   }
+  // 小窗口:面板不得被画到视口外(120px 下限曾把 top 顶成负数 / 底边溢出)。
+  // 950 高的固定视口永远碰不到这条,所以必须单独缩窗口验证。
+  for (const height of [320, 200, 140]) {
+    await page.setViewportSize({ width: 1100, height })
+    await page.mouse.move(0, 0)
+    await fields.first().click()
+    await page.locator('.cm-combo-panel').waitFor()
+    const small = await page.locator('.cm-combo-panel').evaluate(node => node.getBoundingClientRect().toJSON())
+    assert.ok(small.top >= 0 && small.bottom <= height + 1, `${height}px viewport: the open list stays inside the viewport (top ${Math.round(small.top)}, bottom ${Math.round(small.bottom)})`)
+    assert.ok(small.height > 0, `${height}px viewport: the open list keeps a usable height (${Math.round(small.height)})`)
+    await page.keyboard.press('Escape')
+    await page.locator('.cm-combo-panel').waitFor({ state: 'detached' })
+  }
+  await page.setViewportSize({ width: 1100, height: 950 })
   const field = fields.first()
   const options = page.locator('.cm-combo-panel .cm-combo-option')
   const note = page.locator('.cm-combo-note')
+  // 负向断言必须等过自动保存的 120ms 防抖窗口:否则晚到的写入会在断言之后才落地,
+  // 「没有写入」这条永远是绿的。settle() 先等窗口过去,再读计数。
+  const settle = async () => { await page.waitForTimeout(200); return page.evaluate(() => window.patches.length) }
   // 打字实时筛选;未选中的空值字段不写入任何映射。
   await field.click()
   await field.fill('opencode gpt')
   await options.first().waitFor()
   const filtered = await options.allTextContents()
   assert.ok(filtered.length > 1 && filtered.every(label => /opencode/i.test(label) && /gpt/i.test(label)), 'typing filters the list by every keyword')
-  assert.equal(await page.evaluate(() => window.patches.length), 0, 'searching never saves a mapping')
+  assert.equal(await settle(), 0, 'searching never saves a mapping, even after the autosave debounce')
   // 只打了筛选词、还没点选时,清空按钮必须可用(原生 × 已被隐藏)。
   await page.locator('.cm-match-row .cm-combo-clear').first().click()
   assert.equal(await field.inputValue(), '', 'the clear button also clears a typed query')
   await page.locator('.cm-combo-panel').waitFor()
   assert.ok(await options.count() > 100, 'clearing the query keeps the list open and restores every candidate')
-  assert.equal(await page.evaluate(() => window.patches.length), 0, 'clearing a typed query never saves a mapping')
+  assert.equal(await settle(), 0, 'clearing a typed query never saves a mapping, even after the autosave debounce')
   await field.fill('no-model-matches-this-query')
   await note.filter({ hasText: '没有匹配的模型' }).waitFor()
   assert.equal(await page.locator('.cm-combo-panel .cm-combo-option').count(), 0, 'an unmatched query lists no candidates')
   assert.equal(await note.count(), 1, 'the no-match feedback is stated exactly once')
-  assert.equal(await page.evaluate(() => window.patches.length), 0, 'an empty result set never saves a mapping')
+  assert.equal(await settle(), 0, 'an empty result set never saves a mapping, even after the autosave debounce')
   await field.press('Escape')
   await page.locator('.cm-combo-panel').waitFor({ state: 'detached' })
   assert.equal(await field.inputValue(), '', 'Escape closes the list and clears the typed query')
@@ -191,8 +220,8 @@ try {
   await field.locator('xpath=.').evaluate(node => {
     node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: true }))
   })
-  await page.waitForTimeout(150)
-  assert.equal(await page.evaluate(() => window.patches.length), 1, `Enter during IME composition never picks a model (would have picked ${imeTarget})`)
+  // 等过防抖窗口再断言,确保「没选中」不是因为还没来得及写。
+  assert.equal(await settle(), 1, `Enter during IME composition never picks a model (would have picked ${imeTarget})`)
   assert.equal(await field.inputValue(), 'gpt-6-astra', 'the typed query stays while the IME is composing')
   await field.press('Escape')
   await page.locator('.cm-combo-panel').waitFor({ state: 'detached' })
@@ -216,7 +245,14 @@ try {
   // 已选项排在很后面时,打开后必须滚动到它,否则用户看不到自己选的是哪一行。
   await page.locator('.cm-match-row [role=combobox]').nth(1).click()
   await page.locator('.cm-combo-panel').waitFor()
-  await page.waitForTimeout(120)
+  // 滚动由 useLayoutEffect 完成,用条件等待而不是固定 sleep。
+  await page.waitForFunction(() => {
+    const list = document.querySelector('.cm-combo-list')
+    const active = list?.querySelector('[data-active="true"]')
+    if (!list || !active) return false
+    const outer = list.getBoundingClientRect(), inner = active.getBoundingClientRect()
+    return inner.top >= outer.top && inner.bottom <= outer.bottom
+  }, null, { timeout: 5000 })
   const scrolled = await page.locator('.cm-combo-list').evaluate(list => {
     const active = list.querySelector('[data-active="true"]')
     return { scrollTop: list.scrollTop, visible: active ? active.getBoundingClientRect().top >= list.getBoundingClientRect().top && active.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom : null }
@@ -231,8 +267,7 @@ try {
   // 重新点当前已选项不产生第二次写入(旧原生 select 同值不触发 change)。
   const before = await page.evaluate(() => window.patches.length)
   await page.locator('.cm-combo-option[aria-selected=true]').first().click()
-  await page.waitForTimeout(150)
-  assert.equal(await page.evaluate(() => window.patches.length), before, 're-picking the current value does not save again')
+  assert.equal(await settle(), before, 're-picking the current value does not save again, even after the autosave debounce')
   assert.equal(await field.inputValue(), '本地模型（零消耗）', 'the field keeps the chosen label')
   // 清空按钮把该行还原为「未手动指定」。
   await page.locator('.cm-match-row .cm-combo-clear').first().click()
